@@ -49,58 +49,58 @@ load the module with following options:
 #### Loading the module
 
 Minimal: this will configure 1 chain of 1 driver and use pin 22 as CS pin
-'''
+```
 loadrt tmc5160 chains=1 cs_pins=22
-'''
+```
 
 Daisy-chained: this will configure 1 chain of 3 daisy-chained drivers and use pin 22 as CS pin
-'''
+```
 loadrt tmc5160 chains=3 cs_pins=22
-'''
+```
 
 Normal SPI: this will configure 3 chains of 1 driver and use pins 8,22 and 5 as CS pins (one per driver)
-'''
+```
 loadrt tmc5160 chains=1,1,1 cs_pins=8,22,5
-'''
+```
 
 Other parameters:
 -SPI_clk_div : standard is 128 for a SPI frequency of 3.125Mhz. 64 (only possible with external frequency source) would double the speed and 256 half it.
 -TMC_freq : if your TMC drivers are connected to external clock (default internal 12000000)
 
 Full options example:
-'''
+```
 loadrt tmc5160 chains=1 SPI_num=0 CS_num=0 SPI_clk=64 TMC_freq=16000000
-'''
+```
 
 ### On RPi5:
 
 #### Limitations
 
--Limited to 2 chains if using SPI0 and 3 chains if using SPI1.
--Limited to 6 drivers in total, but could be increased easly.
+- Limited to 2 chains if using SPI0 and 3 chains if using SPI1.
+- Limited to 6 drivers in total, but could be increased easly.
 
 #### Loading the module
 
 Minimal: this will configure 1 chain of 1 driver on SPI0 channel with CE0 as CS pin
-'''
+```
 loadrt tmc5160 chains=1
-'''
+```
 
 Daisy-chained: this will configure 1 chain of 3 daisy-chained drivers and SPI1 channel with CE1 as CS pin
-'''
+```
 loadrt tmc5160 chains=3 SPI_num=1 CS_num=1
-'''
+```
 
 Normal SPI: this will configure 2 chains of 1 driver and SPI0 channel with CE0 and CE1 as CS pin
-'''
+```
 loadrt tmc5160 chains=1,1
-'''
+```
 
 Other parameters:
--SPI_freq : to use different SPI speed than standard 4000000 (wich is the maximum for internal clock)
--TMC_freq : if your TMC drivers are connected to external clock (default internal 12000000)
+- SPI_freq : to use different SPI speed than standard 4000000 (wich is the maximum for internal clock)
+- TMC_freq : if your TMC drivers are connected to external clock (default internal 12000000)
 
 Full options example:
-'''
+```
 loadrt tmc5160 chains=1 SPI_num=0 CS_num=0 SPI_freq=8000000 TMC_freq=16000000
-'''
+```
