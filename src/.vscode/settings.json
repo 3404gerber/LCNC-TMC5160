@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "type_traits": "c",
+        "unistd.h": "c",
+        "tmc5160.h": "c",
+        "spi-dw.h": "c"
+    }
+}
