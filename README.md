@@ -123,7 +123,7 @@ the most useful:
 
 Almost all the write registers are mapped. Use decimal value of the register.
 ```
-setp tmc5160.chain.0.driver.0.register.**register_name** 12345
+setp tmc5160.chain.X.driver.X.register.register_name 12345
 ```
 
 - tmc5160.TMC-Disable IN pin allows you to freewheel your drivers
@@ -134,14 +134,14 @@ setp tmc5160.chain.0.driver.0.register.**register_name** 12345
 
 - tmc5160.TMC-Connection OUT pin will confirm that the drivers are online
 
-- tmc5160.TMC-debug-mode IN pin allows you to show different values in tmc5160.chain.**X**.driver.**X**.debug_out
+- tmc5160.TMC-debug-mode IN pin allows you to show different values in tmc5160.chain.X.driver.X.debug_out
 
-- Each driver has a OUT pin for status_word, and out of those 8 bit, 5 are mapped to separate PINS: reset_flag, error_flag, sg2_flag, ref_l_flag, ref_r_flag
+- Each driver has a OUT pin for status_word, and out of those 8 bit, 5 are mapped to separate pins: reset_flag, error_flag, sg2_flag, ref_l_flag, ref_r_flag
 
 ### Changing parameters while running
 
 To keep the execution time slow, the parameters are not set in one cycle. There are 32 bit (some not used yet) to
-indicate if the register has been loaded. The last one (tmc5160.CONF-BITS.CONF_DONE_FLAG) indicates that the drivers
+indicate if the corresponding register has been loaded. The last one (tmc5160.CONF-BITS.CONF_DONE_FLAG) indicates that the drivers
 have been fully configured and are ready to operate.
 
 The read function will first check if the CONF_DONE_FLAG is set. If not, it will call a drive_conf routine that will configure
@@ -149,5 +149,5 @@ one register and terminate the read function. In the next execution of the read 
 Once all the register are configured, the read function can start its real job, which is position reading, and it will do it over and over.
 
 So what if you want to try the Stealthchop function, or try a different value for HSTRT? Well, it is simple: first set your new
-register value, then clear the flag corresponding to your register, for eaxample tmc5160.CONF-BITS.CHOPCONF and finally clear the
+register value, then clear the flag corresponding to your register, for example tmc5160.CONF-BITS.CHOPCONF and finally clear the
 tmc5160.CONF_DONE_FLAG to force the read function to reload the register that have been "unchecked" by reseting their flags.
