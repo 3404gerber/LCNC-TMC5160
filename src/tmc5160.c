@@ -507,7 +507,6 @@ int rt_detect_board(void){
 		}
 
 		for(i = 0; dtcs[i] != NULL; i++) {
-			rtapi_print_msg(RTAPI_MSG_ERR, "dtcs: %s\n", dtcs[i]);
 			if(		!strcmp(dtcs[i], DTC_RPI_MODEL_4B)
 				||	!strcmp(dtcs[i], DTC_RPI_MODEL_4CM)
 				||	!strcmp(dtcs[i], DTC_RPI_MODEL_400)

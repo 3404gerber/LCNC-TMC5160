@@ -1,0 +1,136 @@
+loadrt [KINS]KINEMATICS
+show comp
+
+# motion controller, get name and thread periods from INI file
+loadrt [EMCMOT]EMCMOT servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS
+
+# Use following for RPi4
+#loadrt tmc5160 chains=3 cs_pin=8
+
+# Use following for RPi5
+#loadrt tmc5160 chains=3 SPI_num=0 CS_num=0
+
+loadrt hal_gpio outputs=GPIO25 invert=GPIO25
+
+#PID section for each joint
+loadrt pid names=pid.x,pid.y,pid.z
+
+setp pid.x.FF0 0
+setp pid.x.Pgain 100
+setp pid.x.Igain 0
+setp pid.x.Dgain 0
+setp pid.x.deadband 0.001
+setp pid.x.enable 1
+setp pid.x.error-previous-target 1
+
+setp pid.y.FF0 0
+setp pid.y.Pgain 100
+setp pid.y.Igain 0
+setp pid.y.Dgain 0
+setp pid.y.deadband 0.001
+setp pid.y.enable 1
+setp pid.y.error-previous-target 1
+
+setp pid.z.FF0 0
+setp pid.z.Pgain 100
+setp pid.z.Igain 0
+setp pid.z.Dgain 0
+setp pid.z.deadband 0.001
+setp pid.z.enable 1
+setp pid.z.error-previous-target 1
+
+# Sum function if you want to use direct velocity command and use PID to
+# correct the driver internal clock error 
+loadrt sum2 names=sum.x,sum.y,sum.z
+set sum.x.gain0 1
+set sum.x.gain1 1
+addf sum.x servo-thread
+
+set sum.y.gain0 1
+set sum.y.gain1 1
+addf sum.y servo-thread
+
+set sum.z.gain0 1
+set sum.z.gain1 1
+addf sum.z servo-thread
+
+
+# Set TMC registers (just some shown as example)
+setp tmc5160.chain.0.driver.0.register.ihold_irun 72712
+setp tmc5160.chain.0.driver.0.register.chopconf 38076754
+setp tmc5160.chain.0.driver.0.register.thigh 10
+
+setp tmc5160.chain.0.driver.1.register.ihold_irun 72712
+setp tmc5160.chain.0.driver.1.register.chopconf 38076754
+setp tmc5160.chain.0.driver.1.register.thigh 10
+
+setp tmc5160.chain.0.driver.2.register.ihold_irun 72712
+setp tmc5160.chain.0.driver.2.register.chopconf 38076754
+setp tmc5160.chain.0.driver.2.register.thigh 10
+
+#X Axis Joint 0 Driver 0
+net j0pos-fb	<= tmc5160.chain.0.driver.0.pos-fb	=> joint.0.motor-pos-fb
+net j0pos-fb => pid.x.feedback
+net pid-x-cmd <= joint.0.motor-pos-cmd  => pid.x.command
+
+net j0vel-cmd	<= joint.0.vel-cmd        => sum.x.in0
+net j0-pid           <= pid.x.output        => sum.x.in1
+net j0vel-tmc	<= sum.x.out	=> tmc5160.chain.0.driver.0.vel-cmd
+
+
+#Y Axis Joint 1 Driver 1
+net j1pos-fb	<= tmc5160.chain.1.driver.0.pos-fb	=> joint.1.motor-pos-fb
+net j1pos-fb => pid.y.feedback
+net pid-y-cmd <= joint.1.motor-pos-cmd  => pid.y.command
+
+net j1vel-cmd	<= joint.1.vel-cmd        => sum.y.in0
+net j1-pid           <= pid.y.output        => sum.y.in1
+net j1vel-tmc	<= sum.y.out	=> tmc5160.chain.0.driver.1.vel-cmd
+
+#Z Axis Joint 2 Driver 2
+net j2pos-fb	<= tmc5160.chain.0.driver.2.pos-fb	=> joint.2.motor-pos-fb
+net j2pos-fb => pid.z.feedback
+net pid-z-cmd <= joint.2.motor-pos-cmd  => pid.z.command
+
+net j2vel-cmd	<= joint.2.vel-cmd        => sum.z.in0
+net j2-pid           <= pid.z.output        => sum.z.in1
+net j2vel-tmc	<= sum.z.out	=> tmc5160.chain.0.driver.2.vel-cmd
+
+# GPIO 25 is connected to TMC5160 enable pin 
+net axis-enable <= motion.motion-enabled => hal_gpio.GPIO25-out
+
+# Used by tmc5160 module for speed calculation and pos feedback
+setp tmc5160.chain.0.driver.0.pos-scale [JOINT_0]SCALE
+setp tmc5160.chain.0.driver.1.pos-scale [JOINT_1]SCALE
+setp tmc5160.chain.0.driver.2.pos-scale [JOINT_2]SCALE
+
+# add motion controller functions to servo thread
+addf hal_gpio.write servo-thread
+addf motion-command-handler servo-thread
+addf tmc5160.read servo-thread
+addf pid.x.do-pid-calcs       servo-thread
+addf pid.y.do-pid-calcs       servo-thread
+addf pid.z.do-pid-calcs       servo-thread
+# Uncomment next line if you need debug value (see tmc5160.h for debug-mode value)
+#addf tmc5160.debug servo-thread
+addf tmc5160.write servo-thread
+addf motion-controller servo-thread
+
+# estop loopback
+net estop-loop iocontrol.0.user-enable-out => iocontrol.0.emc-enable-in
+
+# create signals for tool loading loopback
+net tool-prep-loop iocontrol.0.tool-prepare => iocontrol.0.tool-prepared
+net tool-change-loop iocontrol.0.tool-change => iocontrol.0.tool-changed
+
+# amp control - these nets are not used, but are placeholders for
+# converting this sample config to actual machines
+net J0ena <= joint.0.amp-enable-out
+net J1ena <= joint.1.amp-enable-out
+net J2ena <= joint.2.amp-enable-out
+#net J3ena <= joint.3.amp-enable-out
+
+net J0flt => joint.0.amp-fault-in
+net J1flt => joint.1.amp-fault-in
+net J2flt => joint.2.amp-fault-in
+#net J3flt => joint.3.amp-fault-in
