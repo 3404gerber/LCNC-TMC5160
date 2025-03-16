@@ -19,6 +19,9 @@
 *
 * Copyright (c) 2025	All rights reserved.
 *
+* 2025-03-16: Reset now force a reload of all registers if TMCError was active
+* 2025-03-16: bug fix with SPI daisy chain data order
+* 2025-03-15: added sensorless homing and encoder feedback.
 * 2025-02-22: first release on github
 ********************************************************************/
 
@@ -44,7 +47,7 @@
 
 #include "tmc5160.h"
 
-int rtapi_app_main(void){
+int rtapi_app_main(void) {
  
     char name[HAL_NAME_LEN + 1];
 	int i,j,k, retval;
@@ -54,12 +57,16 @@ int rtapi_app_main(void){
 	uint8_t num_chains = 0;
 	uint8_t num_driver = 0;
 
+	// Other functions activation
+	sg_homing = false;
+	bool use_sg_homing[MAX_TMC_DRIVER];
+	encoders = false;
+
 	// Initialise RPi4 / RPi5 identifier variables
 	bcm = false;
 	rp1 = false;
 
-	if(!rt_detect_board())
-	{
+	if (!rt_detect_board()) {
 	  rtapi_print_msg(RTAPI_MSG_ERR,"rt_peripheral_init failed.\n");
       return -1;
 	}
@@ -67,25 +74,28 @@ int rtapi_app_main(void){
 	// Check configured chains and drivers
 	for (i = 0; i < MAX_TMC_DRIVER; i++) {
 		if (chains[i]>0){
-			if (chains[i]<= max_left_drivers){
+			if (chains[i]<= max_left_drivers) {
 				num_chains++;
 				max_left_drivers -= chains[i];
 				num_driver += chains[i];
-			}else{
+			} else {
 				rtapi_print_msg(RTAPI_MSG_ERR,
 					"TMC: ERROR: too many drivers declared! \n");
 				return -1;
 			}
 		}
-		if(rp1 == true & num_chains > (2 + SPI_num)){
+		if (rp1 == true & num_chains > (2 + SPI_num)) {
 			rtapi_print_msg(RTAPI_MSG_ERR,
 					"TMC: ERROR: only 2 chains on SPI0 or 3 on SPI1 allowed on RPi5! \n");
 				return -1;
 		}
     }
 
+	// Saving the number of chains and drivers for later use in routines
+	tmc_drivers_count = num_driver;
+
 	// Check if chip select pins correctly declared
-	if(bcm == true) {
+	if (bcm == true) {
 		for (i = 0; i < MAX_TMC_DRIVER; i++) {
 			if (cs_pins[i]>0){
 				num_cs_pins++;
@@ -95,7 +105,7 @@ int rtapi_app_main(void){
 			rtapi_print_msg(RTAPI_MSG_ERR, "ERROR: wrong number of chip select pins! \n");
 			return -1;
 		}
-	}else{
+	} else {
 		if ((2+SPI_num-CS_num)<num_chains){
 			rtapi_print_msg(RTAPI_MSG_ERR, "ERROR: Max chains if starting at CS pin %u is %u (on SPI%u)! \n", CS_num, (2+SPI_num-CS_num), SPI_num);
 			return -1;
@@ -104,26 +114,43 @@ int rtapi_app_main(void){
 
 	// Check if frequency correctly declared
 	// TODO: finish this part
-	if(bcm == true) {
+	if (bcm == true) {
 		if(SPI_clk_div<128){
-			if(TMC_freq < 12500000 | SPI_clk_div<64){
+			if(TMC_freq < 12500000 || SPI_clk_div<64){
 				rtapi_print_msg(RTAPI_MSG_ERR, "ERROR: The SPI_clk_div is too low for the TMC frequency! Use 128 for TMC internal clock and 64 if with external clock higher than 12.5MHz \n");
 				return -1;
 			}
 		}else if(SPI_clk_div>128){
 			DEBUG_PRINT("With a SPI_clk_div higher than 128, the transmission speed may negatively impact the thread execution time. Rather than decreasing the speed, maybe you can try to connect the drivers in several chains?");
 		}
-	}else{
-		if (SPI_freq >0 & TMC_freq/SPI_freq < 2){
+	} else {
+		if (SPI_freq > 0 && TMC_freq/SPI_freq < 2){
 			rtapi_print_msg(RTAPI_MSG_ERR, "TMC freq has to be at least twice as fast as SPI_freq");
 			return -1;
 		}
 	}
 
+	// Check if sensorless homing is used
+	for (i = 0; i < MAX_TMC_DRIVER; i++) {
+		use_sg_homing[i] = false;
+		if(sg2_homing[i]==1){
+			sg_homing = true;
+			use_sg_homing[i] = true;
+		}
+	}
+
+	// Check if encoders are used for position feedback
+	for (i = 0; i < MAX_TMC_DRIVER; i++) {
+		has_encoder[i] = false;
+		if(use_encoder[i]==1){
+			encoders = true;
+			has_encoder[i] = true;
+		}
+	}
+
     // Connect to the HAL, initialise the driver
     comp_id = hal_init(modname);
-    if (comp_id < 0)
-	{
+    if (comp_id < 0) {
 		rtapi_print_msg(RTAPI_MSG_ERR, "%s ERROR: hal_init() failed \n", modname);
 		return -1;
     }
@@ -137,19 +164,13 @@ int rtapi_app_main(void){
 		return -1;
 	}
 
-	// Saving the number of chains and drivers for later use in routines
-	tmc_drivers_count = num_driver;
-
 	// Initialise the gpio and spi peripherals
-	if(!rt_peripheral_init())
-	{
+	if (!rt_peripheral_init()) {
 	  rtapi_print_msg(RTAPI_MSG_ERR,"rt_peripheral_init failed.\n");
       return -1;
-		
 	}
 
 	// Export global TMC Disable, Reset, Error and Connection bits
-
 	retval = hal_pin_bit_newf(HAL_IN, &(data->TMCDisable),
 		comp_id, "%s.TMC-Disable", prefix);
 	if (retval != 0) goto error;
@@ -167,7 +188,6 @@ int rtapi_app_main(void){
 	if (retval != 0) goto error;
 
 	// Export tmc_debug_mode pin
-
 	retval = hal_pin_s32_newf(HAL_IN, &(data->tmc_debug_mode),
 		comp_id, "%s.TMC-debug-mode", prefix);
 	if (retval != 0) goto error;
@@ -256,13 +276,12 @@ int rtapi_app_main(void){
 
 	//#####################################################################
 
-	// Export all the variables for each chain and driver and initialise the
+	// Export all the pins for each chain and driver and initialise the
 	// register default values.
-
 	k=0;
     for (i = 0; i < num_chains; i++) {
 
-		for (j = 0; j < chains[i]; j++){
+		for (j = 0; j < chains[i]; j++) {
 
 			//##################### TMC Registers #####################//
 
@@ -377,43 +396,58 @@ int rtapi_app_main(void){
 			data->pos_scale[k] = 1;
 
 			retval = hal_pin_u32_newf(HAL_OUT, &(data->tmc_debug_out[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.debug_out", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.debug-out", prefix, i,j);
 			if (retval < 0) goto error;
 			*(data->tmc_debug_out[k]) = 0;
 
 			//############### TMC Status word and flags ###############//
 
 			retval = hal_pin_bit_newf(HAL_OUT, &(data->tmc_reset_flag[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.status.tmc_reset_flag", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.status.tmc-reset-flag", prefix, i,j);
 			if (retval < 0) goto error;
 
 			retval = hal_pin_bit_newf(HAL_OUT, &(data->tmc_driver_error[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.status.tmc_error_flag", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.status.tmc-error-flag", prefix, i,j);
 			if (retval < 0) goto error;
 
 			retval = hal_pin_bit_newf(HAL_OUT, &(data->tmc_sg2[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.status.tmc_sg2_flag", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.status.tmc-sg2-flag", prefix, i,j);
 			if (retval < 0) goto error;
 
 			retval = hal_pin_bit_newf(HAL_OUT, &(data->tmc_stop_l[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.status.ref_l_flag", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.status.ref-l-flag", prefix, i,j);
 			if (retval < 0) goto error;
 
 			retval = hal_pin_bit_newf(HAL_OUT, &(data->tmc_stop_r[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.status.ref_r_flag", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.status.ref-r-flag", prefix, i,j);
 			if (retval < 0) goto error;
 
 			retval = hal_pin_u32_newf(HAL_OUT, &(data->tmc_status[k]),
-				comp_id, "%s.chain.%01d.driver.%01d.status.tmc_status_word", prefix, i,j);
+				comp_id, "%s.chain.%01d.driver.%01d.status.tmc-status-word", prefix, i,j);
 			if (retval < 0) goto error;
 
+			
+
+			//############### StallGuard homing pins ###############//
+
+			if (use_sg_homing[k]) {
+
+				retval = hal_pin_bit_newf(HAL_IO, &(data->tmc_index_enable[k]),
+					comp_id, "%s.chain.%01d.driver.%01d.homing.index-enable", prefix, i,j);
+				if (retval < 0) goto error;
+
+				retval = hal_param_u32_newf(HAL_RW, &(data->tmc_homing_current[k]),
+					comp_id, "%s.chain.%01d.driver.%01d.homing.current-percent", prefix, i,j);
+				if (retval < 0) goto error;
+				data->tmc_homing_current[k] = 50;
+
+			}
 			k++;
 		}
-
 	}
 
 	// Initialise the TMC drivers and check communication
-	if(!rt_tmc_init()) {
+	if (!rt_tmc_init()) {
 	  rtapi_print_msg(RTAPI_MSG_ERR,"rt_tmc_init failed.\n");
       return -1;
 	}
@@ -470,12 +504,11 @@ int rtapi_app_main(void){
     return 0;	
 }
 
-void rtapi_app_exit(void)
-{
+void rtapi_app_exit(void) {
     hal_exit(comp_id);
 }
 
-int rt_detect_board(void){
+int rt_detect_board(void) {
 	FILE *fp;
 	int i, j;
 	char buf[256];
@@ -500,7 +533,7 @@ int rt_detect_board(void){
 		for(i = 0, cptr = buf; i < DTC_MAX && cptr; i++) {
 			dtcs[i] = cptr;
 			j = strlen(cptr);
-			if((cptr - buf) + j + 1 < buflen)
+			if ((cptr - buf) + j + 1 < buflen)
 				cptr += j + 1;
 			else
 				cptr = NULL;
@@ -516,33 +549,33 @@ int rt_detect_board(void){
 				DEBUG_PRINT("Raspberry Pi 3 or 4, using BCM2835 driver\n");
 				bcm = true;
 				break;	// Found our supported board
-			}else if(!strcmp(dtcs[i], DTC_RPI_MODEL_5B) || !strcmp(dtcs[i], DTC_RPI_MODEL_5CM)) {
+			} else if (!strcmp(dtcs[i], DTC_RPI_MODEL_5B) || !strcmp(dtcs[i], DTC_RPI_MODEL_5CM)) {
 				DEBUG_PRINT("Raspberry Pi 5, using rp1 driver\n");
 				rp1 = true;
 				break;	// Found our supported board
-			}else{
+			} else {
 				rtapi_print_msg(RTAPI_MSG_ERR, "Error, RPi not detected\n");
 				return -1;
 			}
 		}
 		fclose(fp);
-	}else{
+	} else {
 		rtapi_print_msg(RTAPI_MSG_ERR,"Cannot open '/proc/device-tree/compatible' for read.\n");
 	}
 }
 
-int rt_peripheral_init(void){
+int rt_peripheral_init(void) {
 
-	if (bcm == true){
+	if (bcm == true) {
 		// Map the RPi BCM2835 peripherals - uses "rtapi_open_as_root" in place of "open"
-		if (!rt_bcm2835_init()){
+		if (!rt_bcm2835_init()) {
 			rtapi_print_msg(RTAPI_MSG_ERR,"rt_bcm2835_init failed. Are you running with root privlages??\n");
 			return -1;
 		}
 
 		// Set the SPI0 pins to the Alt 0 function to enable SPI0 access, setup CS register
 		// and clear TX and RX fifos
-		if (!bcm2835_spi_begin()){
+		if (!bcm2835_spi_begin()) {
 			rtapi_print_msg(RTAPI_MSG_ERR,"bcm2835_spi_begin failed. Are you running with root privlages??\n");
 			return -1;
 		}
@@ -557,21 +590,17 @@ int rt_peripheral_init(void){
 		//bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_16);		// 25MHz on RPI3
 		
 		// check if the default SPI clock divider has been overriden at the command line
-		if (SPI_clk_div != -1){
+		if (SPI_clk_div != -1) {
 			// check that the setting is a power of 2
-			if ((SPI_clk_div & (SPI_clk_div - 1)) == 0)
-			{
+			if ((SPI_clk_div & (SPI_clk_div - 1)) == 0) {
 				bcm2835_spi_setClockDivider(SPI_clk_div);
 				rtapi_print_msg(RTAPI_MSG_INFO,"PRU: SPI clk divider overridden and set to %d\n", SPI_clk_div);			
-			}
-			else
-			{
+			} else {
 				// it's not a power of 2
 				rtapi_print_msg(RTAPI_MSG_ERR,"ERROR: PRU SPI clock divider incorrect\n");
 				return -1;
 			}	
-		}
-		else{
+		} else {
 			bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_16);
 			rtapi_print_msg(RTAPI_MSG_INFO,"PRU: SPI default clk divider set to 16\n");
 		}
@@ -590,9 +619,8 @@ int rt_peripheral_init(void){
 		// Configure pullups on SPI0 pins - source termination and CS high (does this allows for higher clock frequencies??? wiring is more important here)
 		bcm2835_gpio_set_pud(RPI_GPIO_P1_19, BCM2835_GPIO_PUD_DOWN);	// MOSI
 		bcm2835_gpio_set_pud(RPI_GPIO_P1_21, BCM2835_GPIO_PUD_DOWN);	// MISO
-	}
-	else if (rp1 == true){
-		
+	} else if (rp1 == true) {
+
 		if (!rt_rp1lib_init()) {
 			rtapi_print_msg(RTAPI_MSG_ERR,"rt_rp1_init failed.\n");
 			return -1;
@@ -607,8 +635,7 @@ int rt_peripheral_init(void){
 			return -1;
 		}
 		DEBUG_PRINT("rp1spi_init done");
-	}
-	else{
+	} else {
 		return -1;
 	}
 }
@@ -720,7 +747,7 @@ int rt_bcm2835_init(void)
 		bcm2835_spi1 = bcm2835_peripherals + BCM2835_SPI1_BASE/4;
 
 		ok = 1;
-    }else {
+    } else {
 		/* Not root, try /dev/gpiomem */
 		/* Open the master /dev/mem device */
 		if ((memfd = open("/dev/gpiomem", O_RDWR | O_SYNC) ) < 0) {
@@ -793,17 +820,31 @@ int rt_tmc_init(void){
 
 	// Set CS directions
 	// TODO: make this a bit more robust to wrong pin numbers.
-	if(bcm){
+	if (bcm) {
 		for (int i = 0; i < MAX_TMC_DRIVER; i++) {
-			if (cs_pins[i]>0){
+			if (cs_pins[i]>0) {
 				bcm2835_gpio_fsel(cs_pins[i], BCM2835_GPIO_FSEL_OUTP);
 			}
 		}
 	}
 
 	// Try to connect to the driver and reset them
-	if(!tmc_reset())
+	if (!tmc_reset())
 		return -1;
+
+	// Calculating speed and position recipes at module init.
+	idx= tmc_drivers_count;
+	do {
+		--idx;
+		// check for scale change
+		data->old_scale[idx] = data->pos_scale[idx];		// get ready to detect future scale changes
+		// scale must not be 0
+		if ((data->pos_scale[idx] < 1e-20) && (data->pos_scale[idx] > -1e-20))	// validate the new scale value
+			data->pos_scale[idx] = 1.0;										// value too small, divide by zero is a bad thing
+		// we will need the reciprocal
+		data->scale_recip_pos[idx] = 1.0 / data->pos_scale[idx];
+		data->scale_recip_vel[idx] = 1.0 / ((float)TMC_freq / (float)(1ul << 24) / data->pos_scale[idx]);
+	} while(idx);
 
 	//Set Rampmode to positive velocity
 	idx= tmc_drivers_count;
@@ -813,7 +854,7 @@ int rt_tmc_init(void){
 		txData.datagram[idx].value = 0x01;
 		data->tmc_reverse_dir[idx] = false;
 	} while(idx);
-	tmc_spi_write_all(false);
+	tmc_spi_rw_all(true);
 
 	//Set position XACTUAL to 0
 	idx= tmc_drivers_count;
@@ -822,7 +863,7 @@ int rt_tmc_init(void){
 		txData.datagram[idx].regAdr = 0x21;
 		txData.datagram[idx].value = 0x01;
 	} while(idx);
-	tmc_spi_write_all(false);
+	tmc_spi_rw_all(true);
 	*data->xactual_b = 1;
 
 	return 1;
@@ -837,14 +878,15 @@ bool tmc_reset(){
 		--idx;
 		txData.datagram[idx].regAdr = 0x04; //IOIN reg
 	} while(idx);
-	tmc_spi_read_all(false);
-	tmc_spi_read_all(false);
+	tmc_spi_rw_all(false);
+	tmc_spi_rw_all(false);
 
 	idx= tmc_drivers_count;
 	do {
 		--idx;
 		if( rxData.datagram[idx].data[3] == 0 || rxData.datagram[idx].data[3] == 0xFF){
 			rtapi_print_msg(RTAPI_MSG_ERR,"TMC drivers are offline.\n");
+			*data->TMCReset = false;
 			return 0;
 		}
 	} while(idx);
@@ -859,7 +901,7 @@ bool tmc_reset(){
 		txData.datagram[idx].regAdr = 0x01; // GSTAT reg
 		txData.datagram[idx].value = 0x07; // To reset all 3 WC flags (Write to Clear)
 	} while(idx);
-	tmc_spi_write_all(false);
+	tmc_spi_rw_all(true);
 
 	idx= tmc_drivers_count;
 	do {
@@ -867,12 +909,34 @@ bool tmc_reset(){
 		txData.datagram[idx].regAdr = 0x35; // RAMP_STAT reg
 		txData.datagram[idx].value = 0x10CC; // To reset WC bits
 	} while(idx);
-	tmc_spi_write_all(false);
+	tmc_spi_rw_all(true);
 
-	*(data->TMCError) = 0;
+	// If the TMCError was active, force a complete reload of the registers
+	if (*data->TMCError) {
+		*data->gconf_b = 0;
+		*data->global_scaler_b = 0;
+		*data->ihold_irun_b = 0;
+		*data->tpowerdown_b = 0;
+		*data->tpwmthrs_b = 0;
+		*data->tcoolthrs_b = 0;
+		*data->amax_b = 0;
+		*data->vdcmin_b = 0;
+		*data->swmode_b = 0;
+		*data->ramp_stat_b = 0;
+		*data->encmode_b = 0;
+		*data->enc_const_b = 0;
+		*data->enc_deviation_b = 0;
+		*data->chopconf_b = 0;
+		*data->coolconf_b = 0;
+		*data->pwmconf_b = 0;
+
+		*data->TMCError = 0;
+	}
+	
 	// After a reset we will check if the registers need a new load. This is needed, for example,
 	// if we use the "soft disable" function, that will set TOFF value to 0.
 	*data->conf_done_b = false;
+	*data->TMCReset = false;
 
 	return 1;
 }
@@ -887,14 +951,13 @@ void tmc_drive_conf(){
 		--idx;
 		txData.datagram[idx].regAdr = 0x04; //IOIN reg
 	} while(idx);
-	tmc_spi_read_all(false);
-	tmc_spi_read_all(false);
+	tmc_spi_rw_all(false);
+	tmc_spi_rw_all(false);
 
 	idx= tmc_drivers_count;
 	do {
 		--idx;
 		if( rxData.datagram[idx].data[3] == 0 || rxData.datagram[idx].data[3] == 0xFF){
-			*(data->TMCConnection) = 0;
 			DEBUG_PRINT("Trying to configure the drivers, but they're not answering.\n");
 			return;
 		}
@@ -908,7 +971,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x00;
 			txData.datagram[idx].value = data->gconf[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->gconf_b = 1;
 		return;
 	}
@@ -920,7 +983,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x0B;
 			txData.datagram[idx].value = data->global_scaler[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->global_scaler_b = 1;
 		return;
 	}
@@ -932,7 +995,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x10;
 			txData.datagram[idx].value = data->ihold_irun[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->ihold_irun_b = 1;
 		return;
 	}
@@ -943,7 +1006,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x11;
 			txData.datagram[idx].value = data->tpowerdown[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->tpowerdown_b = 1;
 		return;
 	}
@@ -954,7 +1017,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x13;
 			txData.datagram[idx].value = data->tpwmthrs[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->tpwmthrs_b = 1;
 		return;
 	}
@@ -965,7 +1028,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x14;
 			txData.datagram[idx].value = data->tcoolthrs[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->tcoolthrs_b = 1;
 		return;
 	}
@@ -976,7 +1039,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x15;
 			txData.datagram[idx].value = data->thigh[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->thigh_b = 1;
 		return;
 	}
@@ -987,7 +1050,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x26;
 			txData.datagram[idx].value = data->amax[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->amax_b = 1;
 		return;
 	}
@@ -998,7 +1061,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x33;
 			txData.datagram[idx].value = data->vdcmin[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->vdcmin_b = 1;
 		return;
 	}
@@ -1009,7 +1072,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x34;
 			txData.datagram[idx].value = data->sw_mode[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->swmode_b = 1;
 		return;
 	}
@@ -1020,7 +1083,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x35;
 			txData.datagram[idx].value = data->ramp_stat[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->ramp_stat_b = 1;
 		return;
 	}
@@ -1031,7 +1094,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x38;
 			txData.datagram[idx].value = data->encmode[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->encmode_b = 1;
 		return;
 	}
@@ -1042,7 +1105,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x3A;
 			txData.datagram[idx].value = data->enc_const[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->enc_const_b = 1;
 		return;
 	}
@@ -1053,7 +1116,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x3D;
 			txData.datagram[idx].value = data->enc_deviation[idx];
 		} while(idx);
-		tmc_spi_write_all(false);;
+		tmc_spi_rw_all(true);;
 		*data->enc_deviation_b = 1;
 		return;
 	}
@@ -1064,7 +1127,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x6C;
 			txData.datagram[idx].value = data->chopconf[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->chopconf_b = 1;
 		return;
 	}
@@ -1075,7 +1138,7 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x6D;
 			txData.datagram[idx].value = data->coolconf[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->coolconf_b = 1;
 		return;
 	}
@@ -1086,14 +1149,170 @@ void tmc_drive_conf(){
 			txData.datagram[idx].regAdr = 0x70;
 			txData.datagram[idx].value = data->pwmconf[idx];
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->pwmconf_b = 1;
 		return;
 	}
 
+	// Check if speed and position recipes needs to be recalculated
+	idx= tmc_drivers_count;
+	do {
+		--idx;
+		// check for scale change
+		data->old_scale[idx] = data->pos_scale[idx];		// get ready to detect future scale changes
+		// scale must not be 0
+		if ((data->pos_scale[idx] < 1e-20) && (data->pos_scale[idx] > -1e-20))	// validate the new scale value
+			data->pos_scale[idx] = 1.0;										// value too small, divide by zero is a bad thing
+		// we will need the reciprocal
+		data->scale_recip_pos[idx] = 1.0 / data->pos_scale[idx];
+		data->scale_recip_vel[idx] = 1.0 / ((float)TMC_freq / (float)(1ul << 24) / data->pos_scale[idx]);
+	} while(idx);
+
 	// 31. END CONFIG
 	*data->conf_done_b = true;
 	return;
+}
+
+bool tmc_sg2_homing(){
+
+	uint8_t idx;
+	bool write_spi = 0;
+	bool read_spi = 0;
+
+	// First let's put something in the buffer, in case there would be a write spi call.
+	// Just put XCOMPARE to 0 by default, usefull data will be set later
+	idx = tmc_drivers_count;
+	do {
+		--idx;
+		txData.datagram[idx].regAdr = 0x05; // X_Compare register
+		txData.datagram[idx].value = 0;
+	} while(idx);
+	
+	// Now determine the next step for each driver.
+	idx = tmc_drivers_count;
+	do {
+		--idx;
+		switch (homing_state[idx]) {
+	
+			case HOME_IDLE:
+				if(*data->tmc_index_enable[idx])
+					homing_state[idx] = HOME_SET_IRUN;
+
+			case HOME_SET_IRUN:
+				txData.datagram[idx].regAdr = 0x10;
+				uint8_t irun_value = (data->ihold_irun[idx] >> 8) & 0x1F; // Read current IRUN value
+				irun_value = irun_value * ((float)(data->tmc_homing_current[idx]) * 0.01f); // Apply factor
+				uint32_t ihold_irun_temp = data->ihold_irun[idx] & ~(0x1F << 8) | (irun_value << 8); // Replace temporarly old IRUN by new one
+				txData.datagram[idx].value = ihold_irun_temp;
+
+				homing_state[idx] = HOME_SET_SW_MODE;
+				write_spi = true;
+				break;
+
+			case HOME_SET_SW_MODE:
+				txData.datagram[idx].regAdr = 0x34;
+				txData.datagram[idx].value = data->sw_mode[idx] | 0x0400; // Activate sg_stop
+
+				homing_state[idx] = HOME_WAIT_EVENT_SG;
+				write_spi = true;
+				break;
+		
+			case HOME_WAIT_EVENT_SG:
+				if(*data->tmc_sg2[idx]){
+					homing_state[idx] = HOME_SET_XACTUAL;
+					*data->tmc_index_enable[idx] = false;
+				}else{
+					read_spi = true;
+					break;
+				}
+
+			case HOME_SET_XACTUAL:
+				txData.datagram[idx].regAdr = 0x21;
+				txData.datagram[idx].value = 0x01;
+				*(data->pos_fb[idx]) = 0;
+
+				homing_state[idx] = HOME_SET_XENC;
+				write_spi = true;
+				break;
+
+			case HOME_SET_XENC:
+				txData.datagram[idx].regAdr = 0x39;
+				txData.datagram[idx].value = 0x01;
+
+				homing_state[idx] = HOME_RESTORE_IRUN;
+				write_spi = true;
+				break;
+
+			case HOME_RESTORE_IRUN:
+				txData.datagram[idx].regAdr = 0x10;
+				txData.datagram[idx].value = data->ihold_irun[idx];
+
+				homing_state[idx] = HOME_RESTORE_SW_MODE;
+				write_spi = true;
+				break;
+
+			case HOME_RESTORE_SW_MODE:
+				txData.datagram[idx].regAdr = 0x34;
+				txData.datagram[idx].value = data->sw_mode[idx];
+				
+				homing_state[idx] = HOME_RESET_DRIVERS;
+				write_spi = true;
+				break;
+
+			case HOME_RESET_DRIVERS:
+				txData.datagram[idx].regAdr = 0x35;
+				txData.datagram[idx].value = (1U << 6);
+				*(data->tmc_sg2[idx]) = false;
+				homing_state[idx] = HOME_FINISHED;
+				write_spi = true;
+				break;
+
+			case HOME_FINISHED:
+				homing_state[idx] = HOME_IDLE;
+				break;
+
+			default:
+				break;
+		}
+	} while(idx);
+
+	// If there are data to send to drivers, do it quit read function without reading current position,
+	// because we want to avoid long thread time and can live with a couple millisecond delay on reading.
+	// If we are waiting for SG_Stop event, read status each second call, to avoid not updating position at all.
+
+	if (write_spi) {
+		
+		tmc_spi_rw_all(true);
+		return 1;
+		
+	} else if (read_spi) {
+		
+		if (sg_stop_read) {
+			sg_stop_read = false;
+			return 0;
+		}
+		sg_stop_read = true;
+		
+		idx = tmc_drivers_count;
+		do {
+			--idx;
+			txData.datagram[idx].regAdr = 0x35; // RAMP_STAT register
+			txData.datagram[idx].value = 0;
+		} while(idx);
+		
+		tmc_spi_rw_all(false);
+		tmc_spi_rw_all(false);
+
+		idx = tmc_drivers_count;
+		do {
+			--idx;
+			if(rxData.datagram[idx].value & (1U << 6)){*(data->tmc_sg2[idx]) = true;}else{*(data->tmc_sg2[idx]) = false;}
+		} while(idx);
+		
+		return 1;
+	}
+
+	return 0;
 }
 
 void tmc_read(){
@@ -1102,43 +1321,69 @@ void tmc_read(){
 	bool can_check_connection = false;
 
 	// 0. Error management
-	// The first thing to do is to manage errors, e-stop and reset signals.
+	// The first thing to do is to manage errors and reset signals.
 	// Reset drivers on reset request
 	if(*data->TMCReset){
 		tmc_reset();
 		return;
 	}
 	
-	// Quit if TMCError is active or if the drivers are offline
-	if(*data->TMCError || (!(*data->TMCConnection)))
+	// Quit if the drivers are offline
+	if (!(*data->TMCConnection))
 		return;
 
 	// 1. Configuration management.
 	// If the driver are not configured, configure one register then return. Repeat as often as necessary.
-	if(!(*data->conf_done_b)) {
+	if (!(*data->conf_done_b) && !(*data->TMCError)) {
 		tmc_drive_conf();
 		return;
+	}
+
+	// If we use StallGuard homing for at least one driver
+	if (sg_homing) {
+		// If Homing active, manage it !
+		idx = tmc_drivers_count;
+		do {
+			--idx;
+			if(*data->tmc_index_enable[idx] || !homing_state[idx] == 0){
+				if (tmc_sg2_homing()) {
+					return;
+				} else {
+					break;
+				}
+			}
+		} while(idx);
 	}
 
 	// Before reading, check if the returned data can be compared to txBackup to check if the connection is alive.
 	// If the data sent in the previous SPI write call are the same as the one returned by next SPI read call,
 	// then we're all good.
-	if(txBackup_value_is_known)
+	if (txBackup_value_is_known)
 		can_check_connection = true;
 	
 	// 2. Position reading
-	// If daisy-chain mode, switch CS, send dummy data to get XACTUAL data in rxBuffer, switch CS.
-	// Else if individual mode, send read XACTUAL request to all moving driver, then send dummy data
-	// to all moving driver to get XACTUAL data in rxBuffer and copy in feedback variable. Should the
-	// connection to the driver be faulty, the pos-feedback would be zero and trigger a LCNC position
-	// error; I consider this as good enougth if this module gets the information and try to quick-stop
-	// the axis during next call.
+	// Perform a first read XACTUAL (or X_ENC if encoders are used) and, if the connection can be checked, check the
+	// connection. Then read a second time the position to bring back the values latched by the first read. Update
+	// LinuxCNC position.
+
+	// Set register adress to read position
 	idx = tmc_drivers_count;
-	do {
-		--idx;
-		txData.datagram[idx].regAdr = 0x21; //XACTUAL reg
-	} while(idx);
-	tmc_spi_read_all(false);
+	if (encoders) {
+		do {
+			--idx;
+			if (has_encoder[idx]){
+				txData.datagram[idx].regAdr = 0x39; //XACTUAL reg
+			} else {
+				txData.datagram[idx].regAdr = 0x21; //XACTUAL reg
+			}
+		} while(idx);
+	}else{
+		do {
+			--idx;
+			txData.datagram[idx].regAdr = 0x21; //XACTUAL reg
+		} while(idx);
+	}
+	tmc_spi_rw_all(false);
 	
 	// Compare backup txData with rxData; they are equal if the driver are responding. Use it as Wachtdog.
 	if (can_check_connection){
@@ -1155,16 +1400,15 @@ void tmc_read(){
 	}
 
 	// The second read sends back the data latched at first read.
-	tmc_spi_read_all(false);
+	tmc_spi_rw_all(false);
 	
 	// If for any reason the driver sends back a position "0", simply ignore the information and don't update
-	// the position. Not sure if this could be a problem in some cases; it could be good to set a bit to disable
-	// speed cmd update if we are not sure about axis position.
+	// the position.
 	idx = tmc_drivers_count;
 	do {
 		--idx;
-	 	float axis_pos = (float)((int)(rxData.datagram[idx].value))/(data->pos_scale[idx]);
-	 	if(axis_pos!=0.0f) {
+	 	float axis_pos = (float)((int)(rxData.datagram[idx].value)) * data->scale_recip_pos[idx];
+	 	if(rxData.datagram[idx].value!=0) {
 	 		*(data->pos_fb[idx]) = last_pos[idx] = axis_pos;
 	 	}else{
 	 		*(data->pos_fb[idx]) = last_pos[idx];
@@ -1173,7 +1417,7 @@ void tmc_read(){
 
 	// 3. Status checking.
 	// For each driver, read the status bit returned by last read and update the correspondig hal status bits
-	// (drv_error, reset_flag, sg2, stop_l_enable, stop_r_enable)
+	// (drv_error, reset_flag, stop_l_enable, stop_r_enable)
 	// If one of the driver has a drv_error or a reset_flag, set TMCError TRUE. The axis will start EStop on next
 	// function call. The Error is debounced by waiting for 2 successive errors.
 	// If sg2, stop_l or stop_r is set, set corresponding HAL bit.
@@ -1181,20 +1425,13 @@ void tmc_read(){
 	idx = tmc_drivers_count;
 	do {
 		--idx;
-		if((*(data->tmc_status[idx]) & (1 << 0) ) || (*(data->tmc_status[idx]) & ( 1 << 1 ))) {	
-			if(hadErrorFlag) {
+		if((*(data->tmc_status[idx]) & (1 << 0) ) || (*(data->tmc_status[idx]) & ( 1 << 1 ))) {
 				*(data->TMCError) = true;
-				//fprintf(stderr,"DRV_error or Reset_flag! %1$u \n", *(data->tmc_status[idx]), strerror(errno)) ;
-			}else{
-				hadErrorFlag = true;
-			}
-			return;
+				rtapi_print_msg(RTAPI_MSG_ERR,"TMC Driver %1$u error! \n", idx );
 		}
-		if((*(data->tmc_status[idx]) & ( 1 << 2 ))) {*(data->tmc_sg2[idx]) = true;}else{*(data->tmc_sg2[idx]) = false;}
 		if((*(data->tmc_status[idx]) & ( 1 << 6 ))) {*(data->tmc_stop_l[idx]) = true;}else{*(data->tmc_stop_l[idx]) = false;}
 		if((*(data->tmc_status[idx]) & ( 1 << 7 ))) {*(data->tmc_stop_r[idx]) = true;}else{*(data->tmc_stop_r[idx]) = false;}
 	} while(idx);
-	hadErrorFlag = false;
 	//End of the read routine
 }
 
@@ -1203,27 +1440,41 @@ void tmc_write(){
 	uint8_t idx;
 	bool dir_change = false;
 
-	// If there is any error in the module or if the drivers are not yet configured, do nothing.
-	// Quit if TMCError is active
-	if( *data->TMCError || (!(*data->TMCConnection)) || (!(*data->conf_done_b)))
+	// If there is no connection or if the drivers are not yet configured, do nothing.
+	if ((!(*data->TMCConnection)) || (!(*data->conf_done_b)))
 		return;
 
+	// If TMCError is active, try to force the axis to stop. Set conf_done flag to false
+	// so it will just send the 0 velocity once.
+	if (*data->TMCError){
+		idx= tmc_drivers_count;
+		do {
+			--idx;
+			txData.datagram[idx].regAdr = 0x27; //VMAX reg
+			txData.datagram[idx].value = 0;
+		} while(idx);
+	
+		tmc_spi_rw_all(true);
+		*data->conf_done_b = false;
+		return;
+	}
+
 	// If soft disable active, set TOFF 0 once, reset chopconf configuration flag and quit;
-  	if(*data->TMCDisable && *data->chopconf_b){
+  	if (*data->TMCDisable && *data->chopconf_b) {
 		idx= tmc_drivers_count;
 		do {
 			--idx;
 			txData.datagram[idx].regAdr = 0x6C; // RAMP_STAT reg
 			txData.datagram[idx].value = (txData.datagram[idx].value = data->chopconf[idx] &~ 0b1111); // To reset WC bits
 		} while(idx);
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		*data->chopconf_b = false;
 		return;
 	}
 
 	// If chopconf config flag is not set and TMCDisable is not anymore active, reset
 	// conf done flag to force drivers configuration to restore chopconf.
-	if(!*data->chopconf_b){
+	if (!*data->chopconf_b) {
 		if (!*data->TMCDisable){
 			*data->conf_done_b = false;
 		}
@@ -1235,15 +1486,15 @@ void tmc_write(){
 	do {
 		--idx;
 		txData.datagram[idx].regAdr = 0x20; // RAMPMODE reg
-		if(*(data->vel_cmd[idx])<0.0f){
+		if (*(data->vel_cmd[idx])<0.0f) {
 			txData.datagram[idx].value = 2; // Negative direction
-			if(!data->tmc_reverse_dir[idx]){
+			if (!data->tmc_reverse_dir[idx]) {
 				data->tmc_reverse_dir[idx] = true;
 				dir_change = true;
 			}
-		}else{
+		} else {
 			txData.datagram[idx].value = 1; // Positive direction
-			if(data->tmc_reverse_dir[idx]){
+			if(data->tmc_reverse_dir[idx]) {
 				data->tmc_reverse_dir[idx] = false;
 				dir_change = true;
 			}
@@ -1251,7 +1502,7 @@ void tmc_write(){
 	} while(idx);
 	
 	if (dir_change) {
-		tmc_spi_write_all(false);
+		tmc_spi_rw_all(true);
 		dir_change = false;
 	}
 	
@@ -1261,12 +1512,12 @@ void tmc_write(){
 	do {
 		--idx;
 		txData.datagram[idx].regAdr = 0x27; //VMAX reg
-		txData.datagram[idx].value = txBackup[idx] = MIN(MAX_TMC_VEL, abs(speedFromUS(*(data->vel_cmd[idx]), idx)));
+		txData.datagram[idx].value = txBackup[idx] = MIN(MAX_TMC_VEL, abs(*data->vel_cmd[idx]*data->scale_recip_vel[idx]));
 	} while(idx);
 
-	tmc_spi_write_all(false);
+	tmc_spi_rw_all(true);
 
-	// Use a flag to determine that I can use the value saved in txBackup for communication check. Any SPI read or
+	// Use a flag to determine that we can use the value saved in txBackup for communication check. Any SPI read or
 	// write will reset the flag. If before the next read the flag is still high, it is safe to compare txBackup
 	// with data send back from next SPI read call to check communication.
 	txBackup_value_is_known = 1;
@@ -1278,7 +1529,7 @@ void tmc_debug_read(){
 	uint8_t reg_to_read, offset = 0;
 	uint32_t mask = 0;
 
-	switch(*data->tmc_debug_mode){
+	switch (*data->tmc_debug_mode) {
 		// Mode = 0 => 8 first bits of IOIN
 		case 0:
 			reg_to_read = 0x04;
@@ -1360,8 +1611,8 @@ void tmc_debug_read(){
 		--idx;
 		txData.datagram[idx].regAdr = reg_to_read; //XACTUAL reg
 	} while(idx);
-	tmc_spi_read_all(false);
-	tmc_spi_read_all(false);
+	tmc_spi_rw_all(false);
+	tmc_spi_rw_all(false);
 
 	idx = tmc_drivers_count;
 	do {
@@ -1371,105 +1622,57 @@ void tmc_debug_read(){
 
 }
 
-void tmc_spi_read_all (){
+void tmc_spi_rw_all (bool write) {
 
-	uint8_t idx,idy,i = 0;
+	uint8_t idx,idy,idz,i = 0;
+	uint8_t write_access = write? 0x80 : 0x00;
 	const size_t packetLen = 5;
 
 	txBackup_value_is_known = 0;
 
-	for (int i=0 ; i<MAX_TMC_DRIVER; i++){
+	for (i=0 ; i<MAX_TMC_DRIVER; i++) {
 		if(chains[i]>0){
 			
 			size_t first_byte_chain = packetLen * idx;
 			size_t total_bytes = packetLen * chains[i];
 			uint8_t in[total_bytes];
 			uint8_t out[total_bytes];
-
-			idy = chains[i];
-			do{
-				--idy;
-				out[idy+0] = txData.datagram[idx+idy].regAdr;
-				out[idy+1] = 0;
-				out[idy+2] = 0;
-				out[idy+3] = 0;
-				out[idy+4] = 0;
-			}while(idy);
-
-			if(bcm){
-				bcm2835_gpio_clr(cs_pins[i]);
-				bcm2835_spi_transfernb(out, in, total_bytes);
-			}else if(rp1){
-				rp1spi_transfer(SPI_num, i, out, in, total_bytes);
+			
+			// This part is a bit messy. For each chain, the data for the last driver in
+			// the chain has to go out first. idx keeps track of the first driver number
+			// in chains. idy is used to loop drivers in current chain. idz contains the
+			// position of current driver in txData buffer.
+			for (idy = 0; idy<chains[i];idy++){
+				idz = idx+chains[i]-1-idy;
+				out[(idy*packetLen)+0] = txData.datagram[idz].regAdr | write_access;
+				out[(idy*packetLen)+1] = txData.datagram[idz].data[3];
+				out[(idy*packetLen)+2] = txData.datagram[idz].data[2];
+				out[(idy*packetLen)+3] = txData.datagram[idz].data[1];
+				out[(idy*packetLen)+4] = txData.datagram[idz].data[0];
 			}
 
-			idy = chains[i];
-			do{
-				--idy;
-				*(data->tmc_status[idx+idy]) = rxData.datagram[idx+idy].regAdr = in[idy+0];
-				rxData.datagram[idx+idy].data[3] = in[idy+1];
-				rxData.datagram[idx+idy].data[2] = in[idy+2];
-				rxData.datagram[idx+idy].data[1] = in[idy+3];
-				rxData.datagram[idx+idy].data[0] = in[idy+4];
-			}while(idy);
+			if (bcm) {
+				bcm2835_gpio_clr(cs_pins[i]);
+				bcm2835_spi_transfernb(out, in, total_bytes);
+			} else if (rp1) {
+				rp1spi_transfer(SPI_num, i, out, in, total_bytes);
+			}
 			
-			if(bcm){
+			// Same as before, the data received first are for the last driver in chain.
+			for (idy = 0; idy<chains[i];idy++){
+				idz = idx+chains[i]-1-idy;
+				*(data->tmc_status[idx+chains[i]-idy-1]) = rxData.datagram[idx+idy].regAdr = in[(idy*packetLen)+0];
+				rxData.datagram[idz].data[3] = in[(idy*packetLen)+1];
+				rxData.datagram[idz].data[2] = in[(idy*packetLen)+2];
+				rxData.datagram[idz].data[1] = in[(idy*packetLen)+3];
+				rxData.datagram[idz].data[0] = in[(idy*packetLen)+4];
+			}
+			
+			if (bcm) {
 				bcm2835_gpio_set(cs_pins[i]);
 			}
 			idx += chains[i];
-		}else{
-			break;
-		}
-	}
-}
-
-void tmc_spi_write_all () {
-
-	uint8_t idx,idy,i = 0;
-	const size_t packetLen = 5;
-
-	txBackup_value_is_known = 0;
-
-	for (i=0 ; i<MAX_TMC_DRIVER; i++){
-		if(chains[i]>0){
-			
-			size_t first_byte_chain = packetLen * idx;
-			size_t total_bytes = packetLen * chains[i];
-			uint8_t in[total_bytes];
-			uint8_t out[total_bytes];
-
-			idy = chains[i];
-			do{
-				--idy;
-				out[idy+0] = txData.datagram[idx+idy].regAdr | 0x80;
-				out[idy+1] = txData.datagram[idx+idy].data[3];
-				out[idy+2] = txData.datagram[idx+idy].data[2];
-				out[idy+3] = txData.datagram[idx+idy].data[1];
-				out[idy+4] = txData.datagram[idx+idy].data[0];
-			}while(idy);
-
-			if(bcm){
-				bcm2835_gpio_clr(cs_pins[i]);
-				bcm2835_spi_transfernb(out, in, total_bytes);
-			}else if(rp1){
-				rp1spi_transfer(SPI_num, i, out, in, total_bytes);
-			}
-
-			idy = chains[i];
-			do{
-				--idy;
-				*(data->tmc_status[idx+idy]) = rxData.datagram[idx+idy].regAdr = in[idy+0];
-				rxData.datagram[idx+idy].data[3] = in[idy+1];
-				rxData.datagram[idx+idy].data[2] = in[idy+2];
-				rxData.datagram[idx+idy].data[1] = in[idy+3];
-				rxData.datagram[idx+idy].data[0] = in[idy+4];;
-			}while(idy);
-			
-			if(bcm){
-				bcm2835_gpio_set(cs_pins[i]);
-			}
-			idx += chains[i];
-		}else{
+		} else {
 			break;
 		}
 	}
